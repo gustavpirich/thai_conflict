@@ -1,0 +1,742 @@
+---
+title: "Of Fights and Lights: Conflict and Economic Activity in Thailand"
+author:
+  - "Gustav Pirich (h11910449)"
+date: "May 4, 2024"
+output:
+  pdf_document:
+    toc: true
+    includes:
+      in_header: !expr file.path("~/Desktop/GITHUB/spatial_econ/helper/wraper_code.tex")
+bibliography: references.bib
+nocite: '@*'
+header-includes:
+  - \usepackage{tcolorbox}
+  - \usepackage[default]{lato}
+  - \usepackage{rotating}
+  - \usepackage{dcolumn}
+  - \usepackage{booktabs}
+  - \usepackage{float}
+papersize: a4
+geometry: margin=2cm
+urlcolor: DarkOrchid!65!black
+---
+
+
+```{r, setup, echo = FALSE, warning=FALSE, results = 'hide'}
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 80), tidy = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+pacman::p_load(spatialreg, showtext, magritr, bsreg, spdep, patchwork, gridExtra, fixest, splm, stringi, stringr, stringdist, haven, sf, dplyr, fuzzyjoin, comparator, digest, zoomerjoin, ggplot2, tidyr, ggthemes, viridis, rmapshaper, fixest, conleyreg, plm, stargazer, bsreg, igraph, generics, knitr, kableExtra, formatR,readxl, haven, flextable, broom, units, sysfonts, showtextdb, tmap, viridis)
+```
+
+\vspace{2em}
+
+\begin{tcolorbox}
+\centering \itshape The code that was used in compiling the assignment is available on GitHub at \url{https://github.com/gustavpirich/thai_conflict}.
+\end{tcolorbox}
+
+
+\newpage 
+
+To investigate the connection between conflicts and nighttime lights in Thailand, I use nighttime light data at the province level. Thailand has a total number of 928 provinces. I use DSMP nighttime light data for the period from 1992 up until 2011. For the period from 2012 to 2021, I use VIIRS nighttime lights data. Both datasets are sourced from @aiddata_2021. I present three variables; the mean intensity of nighttime lights in a the first and last year of the sample, the growth rate of nighttime lights over a period, and the number of conflict events.
+
+
+# DSMP Nighttime Lights from 1992-2011
+
+The panel on the left displays nighttime light intensities in Thailand. Economic activity is strongly concentrated in Bangkok, the economic and political center of the country. The second panel displays the relative change of nighttime lights from 1992 to 2011. The panel on the right presents the number of reported conflict events over the time period. \footnote{Note that DSMP data suffers from topcoding, which might lead to an understatement of growth rates in urban areas such as Bangkok}
+
+From the third map, it can be seen that conflict events are heavily concentrated in the Southern provinces.  The conflict events refer to the long-standing ethnic and religious tensions and insurgencies by Islamist groups. The first panel demonstrates that the Southern part of the country is likely to be poor and agrarian as proxied by nighttime lights. However, the provinces affected by conflict events seem to have grown at an even faster pace than  the rest of the country. 
+
+```{r, echo = FALSE, include=FALSE}
+
+# Read shapefiles for national and first administrative level geometries
+thai_0 <- read_sf("gadm41_THA_shp/gadm41_THA_0.shp")
+thai_1 <- read_sf("gadm41_THA_shp/gadm41_THA_1.shp")
+thai_2 <- read_sf("gadm41_THA_shp/gadm41_THA_2.shp")
+
+thai_0_adm <- read_sf("/Users/gustavpirich/Desktop/GITHUB/thai_conflict/geoBoundaries-THA-ADM0-all/geoBoundaries-THA-ADM0.shp")
+thai_1_adm <- read_sf("/Users/gustavpirich/Desktop/GITHUB/thai_conflict/geoBoundaries-THA-ADM1-all/geoBoundaries-THA-ADM1.shp")
+thai_2_adm <- read_sf("/Users/gustavpirich/Desktop/GITHUB/thai_conflict/geoBoundaries-THA-ADM2-all/geoBoundaries-THA-ADM2.shp")
+
+# Read the conflict data
+conflict <- readRDS("ged241.rds")
+
+# Filter thai conflict data and convert to spatial dataframe
+thai_conflict <- conflict %>%
+  filter(country == "Thailand") %>%
+  st_as_sf(coords = c("longitude", "latitude"))
+
+# Set coordinate reference system for spatial data
+thai_conflict <- st_set_crs(thai_conflict, 4326)
+
+# Define a sequence of years for analysis
+year <- 1992:2020
+
+# Create a dataframe with all combinations of GID and year
+expanded_df <- expand.grid(thai_1$GID_1, year)
+names(expanded_df) <- c("GID_1", "year")
+
+# Spatial join to match conflicts to provinces using geometry
+joined_data <- st_join(thai_conflict, thai_1 %>% select(GID_1, geometry), join = st_within)
+
+# Create a conflict event panel data
+conflict_panel <- expanded_df %>%
+  left_join(joined_data, by = c("GID_1", "year"))
+
+# Summarize number of conflict events per province per year
+simplified_data <- conflict_panel %>%
+  group_by(GID_1, year) %>%
+  summarise(number_of_events = sum(!is.na(conflict_name)), .groups = "drop") %>%
+  left_join(thai_1 %>% select(GID_1, geometry))
+
+# Simplify the geometries to improve performance of plotting
+thai_1_simplified <- thai_1 %>%
+  st_simplify(dTolerance = 1000) %>%
+  select(GID_1, geometry)
+
+```
+
+
+```{r, echo = FALSE}
+thai_2_adm <- read_sf("/Users/gustavpirich/Desktop/GITHUB/thai_conflict/geoBoundaries-THA-ADM2-all/geoBoundaries-THA-ADM2.shp")
+
+adm2_dsmp <- read.csv("adm2_dsmp.csv")
+
+# Transform to long format
+adm2_dsmp_long <- adm2_dsmp %>%
+  pivot_longer(
+    cols = starts_with("v4composites_calibrated_201709"), # Update prefix to match new dataset
+    names_to = "year", # name of the new key column
+    values_to = "mean_intensity" # name of the new value column
+  )  %>% 
+  mutate(year = as.numeric(gsub("v4composites_calibrated_201709\\.|\\.mean", "", year))) 
+
+
+# Extract the year from the column name
+adm2_dsmp_long_prep <- adm2_dsmp_long %>%
+  group_by(shapeID, shapeName) %>%
+  mutate(mean_intensity = mean_intensity + 1) %>%
+  filter(year %in% c(1992, 2011)) %>% # Adjust the years based on the new dataset
+  summarise(
+    growthRate = (mean_intensity[year == 2011] - mean_intensity[year == 1992]) / mean_intensity[year == 1992]
+  ) 
+
+# downsampling the adminstrative units of thai_2_adm
+thai_2_adm_simplify <- thai_2_adm %>% 
+  st_simplify(dTolerance = 500)
+
+geo_adm2_growth <- left_join(adm2_dsmp_long_prep, thai_2_adm_simplify, by = c("shapeName"))
+
+geo_adm2_growth <- geo_adm2_growth %>%
+  st_as_sf 
+
+######### Data Preparation for Lights 
+
+
+adm2_dsmp_long_2011 <- adm2_dsmp_long %>%
+  filter(year == 1992) %>%
+  mutate(shapeID = str_extract(shapeID, "B\\d+")) %>%
+  mutate(shapeID = str_sub(shapeID, 2)) # Remove the 'B' from the extracted string
+
+# downsampling the adminstrative units of thai_2_adm
+thai_2_adm_simplify <- thai_2_adm %>% 
+  st_simplify(dTolerance = 500)
+
+geo_adm2_wealth <- cbind(adm2_dsmp_long_2011, thai_2_adm_simplify)
+
+geo_adm2_wealth_sf <- geo_adm2_wealth %>%
+  st_as_sf 
+####################################  
+
+# Read the conflict data
+conflict <- readRDS("ged241.rds")
+
+# Filter thai conflict data and convert to spatial dataframe
+thai_conflict <- conflict %>%
+  filter(country == "Thailand") %>%
+  st_as_sf(coords = c("longitude", "latitude"))
+
+# Set coordinate reference system for spatial data
+thai_conflict <- st_set_crs(thai_conflict, 4326)
+
+# filtering for Thai conflict events form 1992 to 2011
+thai_conflict_viirs <- thai_conflict %>%
+  filter(year %in% c(1992:2011))
+
+# Perform a spatial join to count conflict events within each province
+conflict_counts <- thai_conflict_viirs %>%
+  st_join(thai_2_adm_simplify, join = st_within) %>%
+  group_by(shapeName) %>%  # Adjust this to your province name field
+  summarise(conflict_count = n())
+
+# Merge conflict counts back to the provinces dataset
+thai_provinces <- thai_2_adm_simplify %>%
+  st_join(conflict_counts) %>%
+  mutate(conflict_count = ifelse(is.na(conflict_count), 0, conflict_count))
+###########
+
+
+
+wealth <- tm_shape(geo_adm2_wealth_sf) +
+  tm_fill(
+    "mean_intensity",
+    palette = "magma", 
+    #style = "bclust",
+    breaks = c(0, 10, 20, 30, 40, 50, 63),
+    border.col = "black",
+    border.alpha = 0.2,
+    legend.frame = FALSE, 
+    title.fontface = 2
+  ) +  
+  tm_borders(col = "#333333", lwd = 0.11) +
+  tm_layout(
+    frame = FALSE, 
+    main.title = "Nighttime Light Intensity in 2000",
+    main.title.size = 0.6, 
+    #fontfamily = "Arial",
+    outer.bg.color = "transparent", 
+    bg.color = "transparent",
+    #legend.outside=TRUE,
+    legend.position = c("right", "bottom"), 
+    legend.frame = FALSE, 
+    #scale = 0.7,  # Smaller title size
+    main.title.position = c("left", "top"), 
+    title.size = 0.6,  # Adjust this value to reduce legend title size
+    legend.title.size = 0.4,  # Adjust this value to reduce legend title size
+    legend.text.size = 0.4  # Adjust this value to reduce legend text size
+  )  
+
+
+conflicts_provincial <- tm_shape(thai_provinces) +
+  tm_fill(
+    "conflict_count",
+    palette = "magma", 
+    border.col = "black",
+    border.alpha = 0.2,
+    legend.frame = FALSE, 
+    title.fontface = 2, 
+    breaks = c(0,5,10,15,20,25,30,50)
+  ) +  
+  tm_borders(col = "#333333", lwd = 0.11) +
+  tm_layout(
+    frame = FALSE, 
+    #fontfamily = "Arial",
+    outer.bg.color = "transparent", 
+    bg.color = "transparent",
+    legend.frame = FALSE, 
+    #legend.outside=TRUE,
+    legend.position = c("right", "bottom"),     
+    main.title = "Conflict Events from 1992-2011",
+    #scale = 0.7,  # Smaller title size
+    main.title.position = c("left", "top"), 
+    main.title.size = 0.6,  # Adjust this value to reduce legend title size
+    legend.title.size = 0.4,  # Adjust this value to reduce legend title size
+    legend.text.size = 0.4  # Adjust this value to reduce legend text size
+  )  
+
+growth <- tm_shape(geo_adm2_growth) +
+  tm_polygons(
+    "growthRate",
+    palette = "magma", 
+    #style = "sd",
+    breaks = c(-2, 0, 2, 4, 6, 8, 10, Inf), # Custom breaks
+    #labels <- c("< -4", "-4 to -2", "-2 to 0", "0 to 2", "2 to 4", "4 to 6", "6 to 8", "> 8"), 
+    border.col = "black",
+    border.alpha = 0.2, 
+    title.fontface = 2
+  ) +
+  tm_layout(
+    main.title = "NTL Growth from 1992 to 2011",
+    frame = FALSE, 
+    #fontfamily = "Arial",
+    outer.bg.color = "transparent", 
+    bg.color = "transparent",
+    #legend.outside=TRUE,
+    legend.position = c("right", "bottom"), 
+    legend.frame = FALSE, 
+    #scale = 0.7,  # Smaller title size
+    main.title.position = c("left", "top"), 
+    main.title.size = 0.6,  # Adjust this value to reduce legend title size
+    legend.title.size = 0.4,  # Adjust this value to reduce legend title size
+    legend.text.size = 0.4  # Adjust this value to reduce legend text size
+  )
+
+
+tm_dsmp <- tmap_arrange(wealth, growth, conflicts_provincial, ncol = 3)
+tm_dsmp
+```
+
+
+
+# VIIRS Nighttime Lights 2012-2021
+
+For the second panel I use province-level VIIRS nighttime lights, which are of signficantly higher quality than the DSMP product @Gibson_2021.  
+
+The third panel again displays the conflicts raging in the Southern provinces of Thailand. The first panel shows that these provinces can still be considered to be poor. The second panel displays slower growth rates for the period from 2012 to 2021. Thus, there seems to be a change in the relationship between conflict events and nighttime light growth as compared to the period from 1992 to 2011.  
+
+```{r, echo = FALSE}
+######### Data Preparation for Lights 
+
+# Reading in VIIS data
+adm2_viirs <- read.csv("adm2_viirs.csv")
+
+adm2_viirs_long <- adm2_viirs %>%
+  pivot_longer(
+    cols = starts_with("viirs_ntl_annual_v21_avg_masked"), # specify the prefix common to all year columns
+    names_to = "year", # name of the new key column
+    values_to = "mean_intensity" # name of the new value column
+  ) %>%
+  mutate(year = as.numeric(gsub("viirs_ntl_annual_v21_avg_masked\\.|\\.mean", "", year)))
+
+# Filter VIIRS data for 2014 to plot wealth
+adm2_viirs_2021 <- adm2_viirs_long %>%
+  filter(year == 2021) %>%
+  mutate(shapeID = str_extract(shapeID, "B\\d+")) %>%
+  mutate(shapeID = str_sub(shapeID, 2)) # Remove the 'B' from the extracted string
+
+# downsampling the adminstrative units of thai_2_adm
+thai_2_adm_simplify <- thai_2_adm %>% 
+  st_simplify(dTolerance = 500)
+
+geo_adm2_wealth <- cbind(adm2_viirs_2021, thai_2_adm_simplify)
+
+geo_adm2_wealth_sf <- geo_adm2_wealth %>%
+  st_as_sf 
+####################################  
+
+
+######### Data Preparation for Conflict 
+thai_2_adm_simplified <- thai_2_adm %>% 
+  st_simplify(dTolerance = 500)
+
+# Read the conflict data
+conflict <- readRDS("ged241.rds")
+
+# Filter thai conflict data and convert to spatial dataframe
+thai_conflict <- conflict %>%
+  filter(country == "Thailand") %>%
+  st_as_sf(coords = c("longitude", "latitude"))
+
+# Set coordinate reference system for spatial data
+thai_conflict <- st_set_crs(thai_conflict, 4326)
+
+# filtering for Thai conflict events form 2012 to 2021
+thai_conflict_viirs <- thai_conflict %>%
+  filter(year >= 2012)
+
+# Perform a spatial join to count conflict events within each province
+conflict_counts <- thai_conflict_viirs %>%
+  st_join(thai_2_adm_simplified, join = st_within) %>%
+  group_by(shapeName) %>%  # Adjust this to your province name field
+  summarise(conflict_count = n())
+
+# Merge conflict counts back to the provinces dataset
+thai_provinces <- thai_2_adm_simplified %>%
+  st_join(conflict_counts) %>%
+  mutate(conflict_count = ifelse(is.na(conflict_count), 0, conflict_count))
+###########
+
+
+
+
+
+adm2_viirs <- read.csv("adm2_viirs.csv")
+
+adm2_viirs_long <- adm2_viirs %>%
+  pivot_longer(
+    cols = starts_with("viirs_ntl_annual_v21_avg_masked"), # specify the prefix common to all year columns
+    names_to = "year", # name of the new key column
+    values_to = "mean_intensity" # name of the new value column
+  ) %>%
+  mutate(year = as.numeric(gsub("viirs_ntl_annual_v21_avg_masked\\.|\\.mean", "", year)))
+
+# Extract the year from the column name
+adm2_viirs_long_prep <- adm2_viirs_long  %>%
+  group_by(shapeID) %>%
+  filter(year %in% c(2012, 2021)) %>%
+  summarise(
+    growthRate = (mean_intensity[year == 2021] - mean_intensity[year == 2012]) / mean_intensity[year == 2012]
+  ) %>%
+  mutate(shapeID = str_extract(shapeID, "B\\d+")) %>%
+  mutate(shapeID = str_sub(shapeID, 2)) # Remove the 'B' from the extracted string
+
+
+# downsampling the adminstrative units of thai_2_adm
+thai_2_adm_simplify <- thai_2_adm %>% 
+  st_simplify(dTolerance = 1000)
+
+geo_adm2_growth <- cbind(adm2_viirs_long_prep, thai_2_adm_simplify)
+
+geo_adm2_growth <- geo_adm2_growth %>%
+  st_as_sf 
+
+
+wealth <- tm_shape(geo_adm2_wealth_sf) +
+  tm_fill(
+    "mean_intensity",
+    palette = "magma", 
+    breaks = c(0, 2, 4, 6, 8, 10, Inf),
+    border.col = "black",
+    border.alpha = 0.2,
+    legend.frame = FALSE, 
+    title.fontface = 2
+  ) +  
+  tm_borders(col = "#333333", lwd = 0.11) +
+  tm_layout(
+    frame = FALSE, 
+    main.title = "Nighttime Light Intensity in 2021",
+    main.title.size = 0.6, 
+    #fontfamily = "Arial",
+    outer.bg.color = "transparent", 
+    bg.color = "transparent",
+    legend.position = c("right", "bottom"), 
+    #legend.outside=TRUE,
+    legend.frame = FALSE, 
+    #scale = 0.7,  # Smaller title size
+    main.title.position = c("left", "top"), 
+    title.size = 0.6,  # Adjust this value to reduce legend title size
+    legend.title.size = 0.4,  # Adjust this value to reduce legend title size
+    legend.text.size = 0.4  # Adjust this value to reduce legend text size
+  )  
+  
+
+conflicts_provincial <- tm_shape(thai_provinces) +
+  tm_fill(
+    "conflict_count",
+    palette = "magma", 
+    border.col = "black",
+    border.alpha = 0.2,
+    legend.frame = FALSE, 
+    title.fontface = 2, 
+    breaks = c(0,5,10,15,20,25,30,50)
+  ) +  
+  tm_borders(col = "#333333", lwd = 0.11) +
+  tm_layout(
+    frame = FALSE, 
+    #fontfamily = "Arial",
+    outer.bg.color = "transparent", 
+    bg.color = "transparent",
+    legend.position = c("right", "bottom"), 
+    #legend.outside=TRUE,
+    legend.frame = FALSE, 
+    main.title = "Conflict Events from 2012-2021",
+    #scale = 0.7,  # Smaller title size
+    main.title.position = c("left", "top"), 
+    main.title.size = 0.6,  # Adjust this value to reduce legend title size
+    legend.title.size = 0.4,  # Adjust this value to reduce legend title size
+    legend.text.size = 0.4  # Adjust this value to reduce legend text size
+  )  
+
+growth <- tm_shape(geo_adm2_growth) +
+  tm_polygons(
+    "growthRate",
+    palette = "magma", 
+    breaks = c(-2, 0, 2, 4, 6, 8, 10, 12, Inf), # Custom breaks
+    #labels <- c("< -4", "-4 to -2", "-2 to 0", "0 to 2", "2 to 4", "4 to 6", "6 to 8", "> 8"), 
+    border.col = "black",
+    border.alpha = 0.2, 
+    title.fontface = 2
+  ) +
+  tm_layout(
+    main.title = "NTL Growth from 2012 to 2021",
+    frame = FALSE, 
+    #title = "Percentage Points",
+    #fontfamily = "Arial",
+    outer.bg.color = "transparent", 
+    bg.color = "transparent",
+    legend.position = c("right", "bottom"), 
+    #legend.outside=TRUE,
+    legend.frame = FALSE, 
+    #scale = 0.7,  # Smaller title size
+    main.title.position = c("left", "top"), 
+    main.title.size = 0.6,  # Adjust this value to reduce legend title size
+    legend.title.size = 0.4,  # Adjust this value to reduce legend title size
+    legend.text.size = 0.4  # Adjust this value to reduce legend text size
+  )
+
+
+tm <- tmap_arrange(wealth, growth, conflicts_provincial, ncol = 3)
+tm
+```
+
+
+```{r, echo = FALSE}
+thai_2_adm <- read_sf("/Users/gustavpirich/Desktop/GITHUB/thai_conflict/geoBoundaries-THA-ADM2-all/geoBoundaries-THA-ADM2.shp")
+
+adm2_dsmp <- read.csv("adm2_dsmp.csv")
+
+# Transform to long format
+adm2_dsmp_long <- adm2_dsmp %>%
+  pivot_longer(
+    cols = starts_with("v4composites_calibrated_201709"), # Update prefix to match new dataset
+    names_to = "year", # name of the new key column
+    values_to = "mean_intensity" # name of the new value column
+  )  %>% 
+  mutate(year = as.numeric(gsub("v4composites_calibrated_201709\\.|\\.mean", "", year))) 
+
+
+# Extract the year from the column name
+adm2_dsmp_long_prep <- adm2_dsmp_long %>%
+  group_by(shapeID, shapeName) %>%
+  mutate(mean_intensity = mean_intensity + 1) %>%
+  filter(year %in% c(1992, 2011)) %>% # Adjust the years based on the new dataset
+  summarise(
+    growthRate = (mean_intensity[year == 2011] - mean_intensity[year == 1992]) / mean_intensity[year == 1992]
+  ) 
+
+######### Data Preparation for Lights 
+
+adm2_dsmp_long_2011 <- adm2_dsmp_long %>%
+  filter(year == 2011) %>%
+  mutate(shapeID = str_extract(shapeID, "B\\d+")) %>%
+  mutate(shapeID = str_sub(shapeID, 2)) # Remove the 'B' from the extracted string
+
+
+###### conflict data
+
+# Filter thai conflict data and convert to spatial dataframe
+thai_conflict <- conflict %>%
+  filter(country == "Thailand") %>%
+  st_as_sf(coords = c("longitude", "latitude"))
+
+# Set coordinate reference system for spatial data
+thai_conflict <- st_set_crs(thai_conflict, 4326)
+
+# filtering for Thai conflict events form 2012 to 2021
+thai_conflict_dsmp <- thai_conflict %>%
+  filter(year <= 2011)
+
+# Perform a spatial join to count conflict events within each province
+conflict_counts <- thai_conflict_dsmp %>%
+  st_join(thai_2_adm_simplified, join = st_within) %>%
+  group_by(shapeName) %>%  # Adjust this to your province name field
+  summarise(conflict_count = n())
+
+# Merge conflict counts back to the provinces dataset
+thai_provinces <- thai_2_adm_simplified %>%
+  st_join(conflict_counts) %>%
+  mutate(conflict_count = ifelse(is.na(conflict_count), 0, conflict_count)) %>%
+  rename(shapeName = shapeName.x)
+
+# Identify unique geometries
+is_unique <- !duplicated(thai_provinces$geometry)
+
+# Filter the dataset by unique geometries
+thai_provinces_unique <- thai_provinces[is_unique, ]
+
+
+# merging growth data
+adm2_growth <- adm2_dsmp_long_prep %>%
+  arrange(shapeName)
+
+thai_wealth_conflict <- cbind(thai_provinces_unique, adm2_dsmp_long_2011)
+thai_wealth_conflict_growth <- cbind(thai_wealth_conflict, adm2_growth)
+
+########################## Data Preparation finished for wealth ########################## 
+thai_wealth_conflict_growth <- thai_wealth_conflict_growth %>% 
+  select(shapeName, growthRate, mean_intensity, conflict_count) %>%
+  st_drop_geometry()
+
+
+
+
+
+# Define function to calculate summary statistics
+summary_stats <- function(data) {
+  data %>%
+    summarise(
+      n = n(),
+      "Mean Growth" = mean(growthRate, na.rm = TRUE),
+      "SD Growth" = sd(growthRate, na.rm = TRUE),
+      "Mean Intensity"  = mean(mean_intensity, na.rm = TRUE),
+      "SD Intensity" = sd(mean_intensity, na.rm = TRUE),
+      "Mean Conflict Count" = mean(conflict_count, na.rm = TRUE))
+}
+
+# Calculate summary statistics for the entire dataset
+summary_all <- summary_stats(thai_wealth_conflict_growth)
+
+# Split the data by conflict event presence
+df_conflict <- thai_wealth_conflict_growth %>% filter(conflict_count > 0)
+df_no_conflict <- thai_wealth_conflict_growth %>% filter(conflict_count == 0)
+
+# Calculate summary statistics for both groups
+summary_conflict <- summary_stats(df_conflict)
+summary_no_conflict <- summary_stats(df_no_conflict)
+
+# Combine summaries into one data frame
+summary_df <- rbind(
+  data.frame(Group = "All Data", summary_all),
+  data.frame(Group = "With Conflict", summary_conflict),
+  data.frame(Group = "Without Conflict", summary_no_conflict)
+)
+
+colnames(summary_df) <- c("Group", 
+                          "n", 
+                          "Mean Growth", 
+                          "SD Growth", 
+                          "Mean Intensity", 
+                          "SD Intensity", 
+                          "Mean Conflict Events")
+
+kable(summary_df, caption = "DSMP 1992-2011", digits = 2) %>%
+  kable_styling(font_size = 10) %>%  # Set font size to 10
+  row_spec(0, bold = TRUE) %>%       # Make the header row bold
+  kable_styling(latex_options = "striped", full_width = F) %>%  # Optional: Add stripes for better readability
+  kable_styling(position = "center") %>%  # Center align the table
+  scroll_box(width = "80%", height = "300px")  # Add scroll box if the table is too wide or tall
+
+
+
+
+```
+
+\newpage
+
+```{r, echo = FALSE, fig.pos = "H"}
+thai_2_adm <- read_sf("/Users/gustavpirich/Desktop/GITHUB/thai_conflict/geoBoundaries-THA-ADM2-all/geoBoundaries-THA-ADM2.shp")
+
+# downsampling the adminstrative units of thai_2_adm
+thai_2_adm_simplify <- thai_2_adm %>% 
+  st_simplify(dTolerance = 500)
+
+
+adm2_viirs <- read.csv("adm2_viirs.csv")
+
+adm2_viirs_long <- adm2_viirs %>%
+  pivot_longer(
+    cols = starts_with("viirs_ntl_annual_v21_avg_masked"), # specify the prefix common to all year columns
+    names_to = "year", # name of the new key column
+    values_to = "mean_intensity" # name of the new value column
+  ) %>%
+  mutate(year = as.numeric(gsub("viirs_ntl_annual_v21_avg_masked\\.|\\.mean", "", year)))
+
+# Filter VIIRS data for 2014 to plot wealth
+adm2_viirs_2021 <- adm2_viirs_long %>%
+  filter(year == 2021) %>%
+  mutate(shapeID = str_extract(shapeID, "B\\d+")) %>%
+  mutate(shapeID = str_sub(shapeID, 2)) # Remove the 'B' from the extracted string
+
+
+# Extract the year from the column name
+adm2_viirs_long_prep <- adm2_viirs_long  %>%
+  group_by(shapeID) %>%
+  filter(year %in% c(2012, 2021)) %>%
+  summarise(
+    growthRate = (mean_intensity[year == 2021] - mean_intensity[year == 2012]) / mean_intensity[year == 2012]
+  ) %>%
+  mutate(shapeID = str_extract(shapeID, "B\\d+")) %>%
+  mutate(shapeID = str_sub(shapeID, 2)) # Remove the 'B' from the extracted string
+
+
+
+
+
+# Read the conflict data
+conflict <- readRDS("ged241.rds")
+
+# Filter thai conflict data and convert to spatial dataframe
+thai_conflict <- conflict %>%
+  filter(country == "Thailand") %>%
+  st_as_sf(coords = c("longitude", "latitude"))
+
+# Set coordinate reference system for spatial data
+thai_conflict <- st_set_crs(thai_conflict, 4326)
+
+# filtering for Thai conflict events form 2012 to 2021
+thai_conflict_viirs <- thai_conflict %>%
+  filter(year >= 2012)
+
+# Perform a spatial join to count conflict events within each province
+conflict_counts <- thai_conflict_viirs %>%
+  st_join(thai_2_adm_simplify, join = st_within) %>%
+  group_by(shapeName) %>%  # Adjust this to your province name field
+  summarise(conflict_count = n())
+
+# Merge conflict counts back to the provinces dataset
+thai_provinces <- thai_2_adm_simplify %>%
+  st_join(conflict_counts) %>%
+  mutate(conflict_count = ifelse(is.na(conflict_count), 0, conflict_count))
+###########
+
+
+# Identify unique geometries
+is_unique <- !duplicated(thai_provinces$geometry)
+
+# Filter the dataset by unique geometries
+thai_provinces_unique <- thai_provinces[is_unique, ]
+
+
+
+############## Preparing summary statistics dataset ############## 
+growth_wealth <- left_join(adm2_viirs_2021, adm2_viirs_long_prep)
+
+growth_wealth_conflict <-  cbind(thai_provinces_unique, growth_wealth)
+
+growth_wealth_conflict_final <- growth_wealth_conflict %>%
+  select(shapeName, mean_intensity, growthRate, conflict_count) %>%
+  st_drop_geometry()
+###################################################################
+
+# Define function to calculate summary statistics
+summary_stats <- function(data) {
+  data %>%
+    summarise(
+      n = n(),
+      "Mean Growth" = mean(growthRate, na.rm = TRUE),
+      "SD Growth" = sd(growthRate, na.rm = TRUE),
+      "Mean Intensity"  = mean(mean_intensity, na.rm = TRUE),
+      "SD Intensity" = sd(mean_intensity, na.rm = TRUE),
+      "Mean Conflict Count" = mean(conflict_count, na.rm = TRUE))
+}
+
+# Calculate summary statistics for the entire dataset
+summary_all <- summary_stats(growth_wealth_conflict_final)
+
+# Split the data by conflict event presence
+df_conflict <- growth_wealth_conflict_final %>% filter(conflict_count > 0)
+df_no_conflict <- growth_wealth_conflict_final %>% filter(conflict_count == 0)
+
+# Calculate summary statistics for both groups
+summary_conflict <- summary_stats(df_conflict)
+summary_no_conflict <- summary_stats(df_no_conflict)
+
+# Combine summaries into one data frame
+summary_df <- rbind(
+  data.frame(Group = "All Data", summary_all),
+  data.frame(Group = "With Conflict", summary_conflict),
+  data.frame(Group = "Without Conflict", summary_no_conflict)
+)
+
+
+colnames(summary_df) <- c("Group", 
+                          "n", 
+                          "Mean Growth", 
+                          "SD Growth", 
+                          "Mean Intensity", 
+                          "SD Intensity", 
+                          "Mean Conflict Events")
+
+# Create the kable table with reduced size
+kable(summary_df, caption = "VIIRS 2012-2021", digits = 2) %>%
+  kable_styling(font_size = 10) %>%  # Set font size to 10
+  row_spec(0, bold = TRUE) %>%       # Make the header row bold
+  kable_styling(latex_options = "striped", full_width = F) %>%  # Optional: Add stripes for better readability
+  kable_styling(position = "center") %>%  # Center align the table
+  scroll_box(width = "80%", height = "300px")  # Add scroll box if the table is too wide or tall
+
+```
+
+
+The summary statistics corroborate the intuition gained from the maps. NTL emission in provinces were conflict events were reported grew by 261 percent from 1992 to 2011. NTL emission from peaceful provinces grew by 179 percent over the whole period.
+
+This relationship changed from 2012 up until 2021. Provinces were conflicts were reported increased nighttime light emissions on average by 154%, whereas in peaceful provinces nighttime lights increased by 199%.
+
+The relationship in this context cannot be interpreted as causal. To identify a causal effect of conflict on economic activity, we would need to account for various endogeneity concerns like omitted variable bias and reverse causality.  
+
+To identify the causal effect of conflict on economic activity one could try to estimate the impact in a panel regression using province and time fixed effects, while also controlling for other time-varying factors. The timing of the onset of conflict events might serve as the 'plausibly exogenous' treatment. One could then estimate an event study for the local impact of insurgencies on economic activity. The validity of this identification scheme hinges on the parallel trends assumption. One would need to assume that provinces (or localities) in the absence of conflict would have grown at the same rate. The assumption of this staggered diff-in-diff identification strategy will be biased if there are negative spillover effects from conflicts in Southern parts of the country to the control provinces. Moreover, this estimation strategy will not account for reverse causality concerns. 
+Another estimation strategy is to leverage the synthetic control method as in @Abadie_2003. This approach might allow to relax the parallel trends assumption somewhat, by more flexibly allowing to control for time varying-changes in control units. 
+
+\textbf{Bibliography}
